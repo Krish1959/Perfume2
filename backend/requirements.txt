@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+requests
+python-multipart
+python-dotenv
+openai
+faster-whisper
+numpy
+
+
