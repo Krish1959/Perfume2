@@ -5,6 +5,15 @@
   <title>Perfume — Local HTML + FastAPI</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="./perfume.css" />
+  <script>
+  (function () {
+    const isLocal = location.protocol === "file:" ||
+                    location.hostname === "localhost" ||
+                    location.hostname.startsWith("127.");
+                    // before: ... : "https://perfume-backend-yt2m.onrender.com";
+                    window.API_BASE = isLocal ? "http://localhost:8000" : location.origin;
+                  })();
+  </script>
 </head>
 <body>
   <main class="perfume-app">
@@ -85,19 +94,8 @@
     };
   </script>
 
-  <!-- Robust API base selection -->
-  <script>
-    (function(){
-      const isLocal = location.protocol === "file:" ||
-                      location.hostname === "localhost" ||
-                      location.hostname.startsWith("127.");
-      if (!window.API_BASE || typeof window.API_BASE !== "string" || !window.API_BASE.trim()) {
-        window.API_BASE = isLocal
-          ? "http://localhost:8000"
-          : "https://perfume-backend-yt2m.onrender.com";
-      }
-    })();
-  </script>
+  <!-- Robust API base selection  REMOVED and replacement added in header -->
+
 
   <script src="./perfume.js"></script>
 
@@ -112,3 +110,4 @@
   </script>
 </body>
 </html>
+
