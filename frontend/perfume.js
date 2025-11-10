@@ -1,14 +1,11 @@
 // -----------------------------------------------------
 // API base: robust selection for local vs Render
+//replaced
 (function(){
   const isLocal = location.protocol === "file:" ||
                   location.hostname === "localhost" ||
                   location.hostname.startsWith("127.");
-  if (!window.API_BASE || typeof window.API_BASE !== "string" || !window.API_BASE.trim()) {
-    window.API_BASE = isLocal
-      ? "http://localhost:8000"
-      : "https://perfume-backend-yt2m.onrender.com";
-  }
+  window.API_BASE = isLocal ? "http://localhost:8000" : location.origin;
 })();
 
 // Helpers
@@ -375,3 +372,4 @@ perfumeGrid.addEventListener("touchstart", (e) => {
   e.preventDefault();
   handleTilePress(fig);
 }, { passive: false });
+
