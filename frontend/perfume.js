@@ -292,26 +292,33 @@ async function startRecording() {
 function stopRecording(){ if (mediaRecorder) { try { mediaRecorder.stop(); } catch {} } }
 micBtn.addEventListener("click", () => { if (mediaRecorder) stopRecording(); else startRecording(); });
 
-// Perfume tiles -> explain + (if session) speak
-async function explainPerfume(name) {
+// ---------------------------
+// Tiles: single vs double tap
+// ---------------------------
+const perfumeGrid = $("perfumeGrid");
+
+let clickTimer = null;
+let clickCount = 0;
+const DOUBLE_CLICK_DELAY = 300;
+
+// Send the selected perfume name to backend in EN or ZH and then push to avatar
+async function explainPerfume(name, isDouble) {
   const nm = (name || "").trim(); if (!nm) return;
 
+  // First, place the raw name into the edit box (like before)
   editBox.value = nm;
-  await flog("tiles", "tile pressed", { name: nm });
+  await flog("tiles", isDouble ? "tile double-click" : "tile single-click", { name: nm });
 
-  if (SESSION_ID && SESSION_TOKEN) {
-    const payload = { session_id: SESSION_ID, session_token: SESSION_TOKEN, text: nm };
-    fetch(`${window.API_BASE}/api/send-task`, {
-      method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload)
-    }).catch(()=>{});
-  }
-
+  // Ask OpenAI for explanation in target language
   try {
-    setStatus("Getting perfume details…");
-    const fd = new FormData(); fd.append("name", nm);
+    setStatus(isDouble ? "获取中文香水说明…" : "Getting perfume details…");
+    const fd = new FormData();
+    fd.append("name", nm);
+    fd.append("is_double_click", String(!!isDouble));
+
     const r = await fetch(`${window.API_BASE}/api/perfume-explain`, { method: "POST", body: fd });
     const j = await r.json().catch(()=>({}));
-    await flog("tiles", "/api/perfume-explain response", { http: r.status, body_len: (j && j.response ? j.response.length : 0) });
+    await flog("tiles", "/api/perfume-explain response", { http: r.status, body_len: (j && j.response ? j.response.length : 0), lang: j?.lang });
 
     if (r.status >= 400) { setStatus("OpenAI error (see debug)"); return; }
 
@@ -332,9 +339,39 @@ async function explainPerfume(name) {
   }
 }
 
-$("perfumeGrid").addEventListener("click", async (e) => {
-  const fig = e.target.closest(".perfume-item"); if (!fig) return;
-  const say = fig.getAttribute("data-say") || fig.querySelector("figcaption")?.textContent || "";
+// Centralized handler that disambiguates single vs. double click/tap
+function handleTilePress(figEl) {
+  const say = figEl.getAttribute("data-say") || figEl.querySelector("figcaption")?.textContent || "";
   if (!say.trim()) return;
-  explainPerfume(say);
+
+  clickCount++;
+  if (clickCount === 1) {
+    // May be a single click — set a timer
+    clickTimer = setTimeout(() => {
+      clickCount = 0;
+      explainPerfume(say, /*isDouble*/ false); // English
+    }, DOUBLE_CLICK_DELAY);
+  } else if (clickCount === 2) {
+    // Double click arrived within window — cancel single
+    clearTimeout(clickTimer);
+    clickCount = 0;
+    explainPerfume(say, /*isDouble*/ true); // Mandarin
+  }
+}
+
+// Delegate click events to figures
+perfumeGrid.addEventListener("click", (e) => {
+  const fig = e.target.closest(".perfume-item");
+  if (!fig) return;
+  e.preventDefault(); // avoid accidental selections/navigations
+  handleTilePress(fig);
 });
+
+// Add touchstart to improve responsiveness and suppress double-tap zoom
+perfumeGrid.addEventListener("touchstart", (e) => {
+  const fig = e.target.closest(".perfume-item");
+  if (!fig) return;
+  // Prevent double-tap zoom and click delay on some mobile browsers
+  e.preventDefault();
+  handleTilePress(fig);
+}, { passive: false });
