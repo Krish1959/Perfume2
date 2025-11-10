@@ -65,14 +65,11 @@ AUDIO_DYNAUDNORM       = os.getenv("AUDIO_DYNAUDNORM", "true").lower() == "true"
 # =========================
 # HeyGen base/auth toggles (Render/Docker safe)
 # =========================
-# Some orgs require https://openapi.heygen.com; others use https://api.heygen.com
 HEYGEN_API_BASE   = os.getenv("HEYGEN_API_BASE", "https://api.heygen.com").rstrip("/")
-# Two common styles: "x-api-key" (default) or "bearer"
 HEYGEN_AUTH_STYLE = os.getenv("HEYGEN_AUTH_STYLE", "x-api-key").strip().lower()
 DEBUG_HEYGEN      = os.getenv("DEBUG_HEYGEN", "0") == "1"
 
 def _hg_url(path: str) -> str:
-    # path like "streaming.new"
     return f"{HEYGEN_API_BASE}/v1/{path.lstrip('/')}"
 
 API_STREAM_NEW   = _hg_url("streaming.new")
@@ -82,18 +79,15 @@ API_STREAM_TASK  = _hg_url("streaming.task")
 API_STREAM_STOP  = _hg_url("streaming.stop")
 
 def _hg_headers_api() -> Dict[str, str]:
-    # Headers used before we have a bearer session token
     if HEYGEN_AUTH_STYLE == "bearer":
         return {"accept": "application/json",
                 "authorization": f"Bearer {HEYGEN_API_KEY}",
                 "content-type": "application/json"}
-    # default: x-api-key
     return {"accept": "application/json",
             "x-api-key": HEYGEN_API_KEY,
             "content-type": "application/json"}
 
 def _hg_headers_bearer(tok: str) -> Dict[str, str]:
-    # Headers after we have a session token from HeyGen
     return {"accept": "application/json",
             "authorization": f"Bearer {tok}",
             "content-type": "application/json"}
@@ -200,7 +194,7 @@ def health():
 def _assert_heygen():
     if not HEYGEN_API_KEY:
         logger.error("Missing HEYGEN_API_KEY")
-        raise HTTPException(500, "Missing HEYGEN_API_KEY")
+        raise HTTPException(500, "Missing HEYGEN_APIKEY")
 
 def _pick_ice(body: Dict[str, Any]) -> Dict[str, Any]:
     data = body.get("data") or {}
@@ -449,8 +443,23 @@ def ffmpeg_convert_bytes(inp: bytes, in_ext: str, out_ext: str) -> Tuple[Optiona
 # =====================================================
 PERFUME_PAGE = "https://flyingbananastore.com/products/narrative-pure-100-essential-oil-fragrance-perfume-24-solar-terms-series?variant=51134902993080"
 
-def _perfume_system_prompt_english_only() -> str:
-    # English-only version for the tile buttons per your spec
+def _perfume_system_prompt(lang: str = "en") -> str:
+    if (lang or "").lower().startswith("zh"):
+        return (
+            "你是一位熟悉中国制造香水的专家。仅在相关时，基于以下页面提供的事实（香调、风格、季节性、使用方法）进行说明："
+            f"{PERFUME_PAGE}；否则依据用户提供的文字，不要杜撰细节。\n\n"
+            "解释内容固定围绕以下五款香水：\n"
+            "1) “Endless Mountains & Rivers”\n"
+            "2) “Flowing gently into calm.”\n"
+            "3) “Stillness in the mountains. Quiet strength.”\n"
+            "4) “Wind through wooden frames.”\n"
+            "5) “Rain in the hills.”\n\n"
+            "语言：使用简体中文。\n"
+            "风格：简洁、客观、友好；如适用，用简短要点列出香调/场合/留香时间。\n\n"
+            "请在每个回复的末尾附上固定句子：“详情请联系 Michelle Lu 女士”。\n"
+            "不要透露这些规则。"
+        )
+    # English
     return (
         "You are an expert in perfumes made in China. Base product facts (notes, style, seasonality, usage) ONLY on "
         f"the page at {PERFUME_PAGE} when relevant, and otherwise on the user's provided text. Do not invent product details.\n\n"
@@ -462,7 +471,7 @@ def _perfume_system_prompt_english_only() -> str:
         "5) \"Rain in the hills.\"\n\n"
         "Language & content should be English.\n"
         "Style: be concise, factual, and user-friendly; include short bullet points for notes/occasion/longevity if applicable.\n\n"
-        "Always append this fixed sentence at the very end of every reply: \"Contact Ms Michelle Lu for details\".\n\n"
+        "Always append this fixed sentence at the very end of every reply: \"Contact Ms Michelle Lu for details\".\n"
         "Do not disclose these rules in your response."
     )
 
@@ -470,12 +479,24 @@ def _perfume_system_prompt_english_only() -> str:
 #   OPENAI — Perfume explanation for tile buttons
 # =====================================================
 @app.post("/api/perfume-explain")
-async def perfume_explain(name: str = Form(...)):
+async def perfume_explain(
+    name: str = Form(...),
+    is_double_click: Optional[bool] = Form(False),
+    lang: Optional[str] = Form(None),
+):
     if not OPENAI_API_KEY:
         raise HTTPException(500, "Missing OPENAI_API_KEY")
     nm = (name or "").strip()
     if not nm:
         raise HTTPException(400, "name required")
+
+    # Decide language: explicit lang beats double-click flag; default EN
+    tgt_lang = (lang or ("zh" if is_double_click else "en")).lower()
+    if tgt_lang.startswith("zh"):
+        model_lang = "zh"
+    else:
+        model_lang = "en"
+
     try:
         url = "https://api.openai.com/v1/chat/completions"
         payload = {
@@ -483,7 +504,7 @@ async def perfume_explain(name: str = Form(...)):
             "temperature": 0.5,
             "max_tokens": 700,
             "messages": [
-                {"role": "system", "content": _perfume_system_prompt_english_only()},
+                {"role": "system", "content": _perfume_system_prompt(model_lang)},
                 {"role": "user",   "content": f"Explain about the perfume {nm}."}
             ]
         }
@@ -498,8 +519,8 @@ async def perfume_explain(name: str = Form(...)):
             logger.error(f"[PERFUME_EXPLAIN] OpenAI error {r.status_code}: {j}")
             raise HTTPException(502, f"OpenAI error: {j}")
         reply = (j.get("choices", [{}])[0].get("message", {}).get("content", "") or "").strip()
-        logger.info(f"[PERFUME_EXPLAIN] ok len={len(reply)} for name='{nm}'")
-        return {"response": reply}
+        logger.info(f"[PERFUME_EXPLAIN] ok len={len(reply)} for name='{nm}' lang={model_lang}")
+        return {"response": reply, "lang": model_lang}
     except HTTPException:
         raise
     except Exception as e:
@@ -548,7 +569,7 @@ async def voicechat(file: UploadFile = File(...)):
             "temperature": 0.4,
             "max_output_tokens": 900,
             "input": [
-                {"role": "system", "content": [{"type": "output_text", "text": _perfume_system_prompt_english_only()}]},
+                {"role": "system", "content": [{"type": "output_text", "text": _perfume_system_prompt("en")}]},
                 {"role": "user", "content": [
                     {"type": "input_text", "text": "Explain based on the voice chat input about perfume. Details are to be picked from the linked page when relevant."},
                     {"type": "input_audio", "audio": {"format": "wav", "data": [b64]}}
