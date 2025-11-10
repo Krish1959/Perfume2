@@ -19,8 +19,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY backend /app/backend
 
 # Copy frontend so backend can serve /frontend assets
-COPY frontend /app/frontend
+# COPY frontend /app/frontend
 
 # Render will provide PORT, bind to it
 ENV PORT=8000
 CMD uvicorn backend.main:app --host 0.0.0.0 --port $PORT --workers 1
+
