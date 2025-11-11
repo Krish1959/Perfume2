@@ -5,15 +5,6 @@
   <title>Perfume — Local HTML + FastAPI</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="./perfume.css" />
-  <script>
-  (function () {
-    const isLocal = location.protocol === "file:" ||
-                    location.hostname === "localhost" ||
-                    location.hostname.startsWith("127.");
-                    // before: ... : "https://perfume-backend-yt2m.onrender.com";
-                    window.API_BASE = isLocal ? "http://localhost:8000" : location.origin;
-                  })();
-  </script>
 </head>
 <body>
   <main class="perfume-app">
@@ -23,91 +14,92 @@
     <!-- Avatar Stage -->
     <section class="avatar-stage">
       <!-- Static placeholder (shown when not live or after Stop) -->
-      <img id="avatarPlaceholder"
-           src="https://files2.heygen.ai/avatar/v3/74447a27859a456c955e01f21ef18216_45620/preview_talk_1.webp"
-           alt="Avatar preview" />
-      <video id="avatarVideo" playsinline muted></video>
-      <audio id="avatarAudio"></audio>
-      <div id="audioGate" class="avatar-overlay">
-        <button id="enableBtn" type="button">🔊 Tap to enable sound</button>
+      <div id="avatarPlaceholder" class="avatar-placeholder">
+        <div class="avatar-placeholder-inner">
+          <div class="avatar-badge">Avatar</div>
+          <div class="avatar-hint">Press “Start” to begin</div>
+        </div>
+      </div>
+
+      <!-- Live Video (hidden when not active) -->
+      <video id="avatarVideo" class="avatar-video" autoplay playsinline muted></video>
+
+      <!-- Live Audio (unmuted when gate is enabled) -->
+      <audio id="avatarAudio" class="avatar-audio" autoplay></audio>
+
+      <!-- Status -->
+      <div id="viewerStatus" class="viewer-status">…</div>
+    </section>
+
+    <!-- Controls -->
+    <section class="controls">
+      <div class="ctrl-row">
+        <label>Avatar:</label>
+        <select id="avatarId">
+          <option value="June_HR_public">June_HR_public</option>
+          <option value="Amber_Orator_public">Amber_Orator_public</option>
+        </select>
+        <label>Voice:</label>
+        <select id="voiceId">
+          <option value="68dedac41a9f46a6a4271a95c733823c">Default</option>
+        </select>
+        <label>Pose:</label>
+        <select id="poseName">
+          <option>June HR</option>
+          <option>Stand</option>
+        </select>
+      </div>
+
+      <div class="ctrl-row">
+        <button id="startBtn">Start</button>
+        <button id="stopBtn" disabled>Stop</button>
+        <button id="enableBtn" class="gate" disabled>Enable Audio</button>
+        <button id="disableBtn" class="gate" disabled>Disable Audio</button>
+      </div>
+
+      <div class="ctrl-row">
+        <textarea id="promptTxt" placeholder="Type a prompt to speak…"></textarea>
+        <button id="speakBtn" disabled>Speak</button>
       </div>
     </section>
 
-    <!-- Status line -->
-    <div id="viewerStatus" class="status-bar">Ready.</div>
-
-    <!-- Input + Controls -->
-    <section class="controls-wrap">
-      <textarea id="editBox" class="transcribe-box" placeholder="Message…">Hello, who are you?</textarea>
-
-      <!-- All six controls in ONE row (compact labels) -->
-      <div class="controls-row" id="controlsRow">
-        <button id="btn-mic" class="mic-button" title="Start/End Recording">🎙️ Rec</button>
-        <button id="btn-send-avatar" title="Send to Avatar">💬 Avt</button>
-        <button id="btn-instruction"  title="Instruction">Ins</button>
-        <button id="btn-chatgpt"      title="Send to ChatGPT">GPT</button>
-        <button id="btn-start"        title="Start Session">▶ SS</button>
-        <button id="btn-stop"         title="End Session">⏹ ES</button>
+    <!-- Debug Console -->
+    <section class="debug">
+      <div class="debug-head">
+        <div>Debug Console</div>
+        <button id="clearLogBtn" type="button">Clear</button>
       </div>
+      <textarea id="debugLog" spellcheck="false" readonly></textarea>
     </section>
-
-    <!-- Perfume tiles: single horizontal row -->
-    <h3 style="margin:24px 4px 10px">Perfume Collection</h3>
-    <section id="perfumeGrid" class="perfume-gallery one-row">
-      <figure class="perfume-item" data-say="Endless mountains & rivers.">
-        <img src="./assets/1_Endless_rivers.png" alt="Endless Mountains & Rivers" />
-        <figcaption>Endless Mountains & Rivers</figcaption>
-      </figure>
-
-      <figure class="perfume-item" data-say="Flowing gently into calm.">
-        <img src="./assets/2_Flowing_Calm.png" alt="Flowing Gently Into Calm" />
-        <figcaption>Flowing Gently Into Calm</figcaption>
-      </figure>
-
-      <figure class="perfume-item" data-say="Stillness in the mountains. Quiet strength.">
-        <img src="./assets/3_Still_Mountain.png" alt="Stillness in the Mountains" />
-        <figcaption>Stillness in the Mountains</figcaption>
-      </figure>
-
-      <figure class="perfume-item" data-say="Wind through wooden frames.">
-        <img src="./assets/4_Wind_Frames.png" alt="Wind Through Wooden Frames" />
-        <figcaption>Wind Through Wooden Frames</figcaption>
-      </figure>
-
-      <figure class="perfume-item" data-say="Rain in the hills.">
-        <img src="./assets/5_Rain_Hills.png" alt="Rain in the Hills" />
-        <figcaption>Rain in the Hills</figcaption>
-      </figure>
-    </section>
-
-    <!-- Debug console (unchanged) -->
-    <h3 style="margin:26px 4px 10px">Debug Console</h3>
-    <textarea id="uiDebug" class="transcribe-box" style="min-height:130px" readonly></textarea>
   </main>
 
-  <!-- Fixed avatar/voice/pose (still overridable by backend env) -->
+  <!-- Runtime API base (local vs production) -->
   <script>
-    window.HEYGEN_FIXED = {
-      avatar_id: "June_HR_public",
-      voice_id:  "68dedac41a9f46a6a4271a95c733823c",
-      pose_name: "June HR"
-    };
+    (function(){
+      const params = new URLSearchParams(location.search);
+      const override = params.get("api");
+      if (override) { window.API_BASE = override; return; }
+
+      const isLocal = location.protocol === "file:" ||
+                      location.hostname === "localhost" ||
+                      location.hostname.startsWith("127.");
+      if (!window.API_BASE || typeof window.API_BASE !== "string" || !window.API_BASE.trim()) {
+        window.API_BASE = isLocal
+          ? "http://localhost:8000"
+          : location.origin; // ← same-origin in Render/production
+      }
+    })();
   </script>
-
-  <!-- Robust API base selection  REMOVED and replacement added in header -->
-
 
   <script src="./perfume.js"></script>
 
-  <!-- Auto-start same routine as ▶ SS on power on (optional, keeps your earlier behavior) -->
+  <!-- Optional auto-start (comment out to require manual Start) -->
   <script>
     window.addEventListener("load", () => {
       if (typeof window.__startSession === "function") {
-        // Comment out the next line if you prefer manual start
         // window.__startSession();
       }
     });
   </script>
 </body>
 </html>
-
