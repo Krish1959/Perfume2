@@ -5,18 +5,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# ffmpeg for audio conversion + build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg build-essential && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install deps first
+# install deps (paths relative to REPO ROOT)
 COPY backend/requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
 
-# Copy backend and frontend so FastAPI can serve the static UI
+# copy app
 COPY backend /app/backend
 COPY frontend /app/frontend
 
