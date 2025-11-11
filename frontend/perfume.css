@@ -112,10 +112,9 @@ html, body {
   transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease;
   box-shadow: 0 6px 16px rgba(0,0,0,.25); text-align: center;
 
-  /* Added for robust mobile clicks: prevent zoom/select */
-  user-select: none;
-  -webkit-user-select: none;
+  /* double-tap friendliness */
   touch-action: manipulation;
+  user-select: none;
 }
 .perfume-item:hover {
   transform: translateY(-2px); border-color: var(--border-2);
