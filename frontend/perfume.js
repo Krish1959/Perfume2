@@ -1,375 +1,105 @@
-// -----------------------------------------------------
-// API base: robust selection for local vs Render
-//replaced
-(function(){
-  const isLocal = location.protocol === "file:" ||
-                  location.hostname === "localhost" ||
-                  location.hostname.startsWith("127.");
-  window.API_BASE = isLocal ? "http://localhost:8000" : location.origin;
-})();
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Perfume — Local HTML + FastAPI</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="./perfume.css" />
+</head>
+<body>
+  <main class="perfume-app">
+    <!-- Title -->
+    <div class="avatar-title">Perfume Sales Assistant: <span id="aname">—</span></div>
 
-// Helpers
-function $(id){ return document.getElementById(id); }
-function setStatus(msg){ $("viewerStatus").textContent = msg; }
-function uiLog(area, message, extra = {}) {
-  try {
-    const box = $("uiDebug");
-    const ts  = new Date().toLocaleTimeString();
-    const line = `[${ts}] [${area}] ${message}` + (Object.keys(extra).length ? ` | ${JSON.stringify(extra)}` : "");
-    box.value += (box.value ? "\n" : "") + line;
-    box.scrollTop = box.scrollHeight;
-  } catch {}
-}
-async function flog(area, message, extra = {}, level = "INFO") {
-  uiLog(area, message, extra);
-  try {
-    await fetch(`${window.API_BASE}/api/log`, {
-      method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ area, message, extra, level })
-    });
-  } catch {}
-}
+    <!-- Avatar Stage -->
+    <section class="avatar-stage">
+      <!-- Static placeholder (shown when not live or after Stop) -->
+      <div id="avatarPlaceholder" class="avatar-placeholder">
+        <div class="avatar-placeholder-inner">
+          <div class="avatar-badge">Avatar</div>
+          <div class="avatar-hint">Press “Start” to begin</div>
+        </div>
+      </div>
 
-// Refs
-const nameEl   = $("aname");
-const videoEl  = $("avatarVideo");
-const audioEl  = $("avatarAudio");
-const gateEl   = $("audioGate");
-const gateBtn  = $("enableBtn");
-const placeholderEl = $("avatarPlaceholder");
+      <!-- Live Video (hidden when not active) -->
+      <video id="avatarVideo" class="avatar-video" autoplay playsinline muted></video>
 
-const editBox  = $("editBox");
-const micBtn   = $("btn-mic");
-const sendBtn  = $("btn-send-avatar");
-const instrBtn = $("btn-instruction");
-const gptBtn   = $("btn-chatgpt");
-const startBtn = $("btn-start");
-const stopBtn  = $("btn-stop");
+      <!-- Live Audio (unmuted when gate is enabled) -->
+      <audio id="avatarAudio" class="avatar-audio" autoplay></audio>
 
-// State
-let SESSION_ID = null, SESSION_TOKEN = null, OFFER_SDP = null, pc = null;
-let RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] };
+      <!-- Status -->
+      <div id="viewerStatus" class="viewer-status">…</div>
+    </section>
 
-// Initial ping
-(async () => {
-  try {
-    const r = await fetch(`${window.API_BASE}/api/ping`);
-    await flog("frontend", "perfume.js loaded", { api_base: window.API_BASE, ping: r.status });
-    setStatus("Ready.");
-  } catch (e) {
-    await flog("frontend", "perfume.js load error", { err: String(e), api_base: window.API_BASE }, "ERROR");
-    setStatus("Backend not reachable at " + window.API_BASE);
-  }
-})();
+    <!-- Controls -->
+    <section class="controls">
+      <div class="ctrl-row">
+        <label>Avatar:</label>
+        <select id="avatarId">
+          <option value="June_HR_public">June_HR_public</option>
+          <option value="Amber_Orator_public">Amber_Orator_public</option>
+        </select>
+        <label>Voice:</label>
+        <select id="voiceId">
+          <option value="68dedac41a9f46a6a4271a95c733823c">Default</option>
+        </select>
+        <label>Pose:</label>
+        <select id="poseName">
+          <option>June HR</option>
+          <option>Stand</option>
+        </select>
+      </div>
 
-// Audio gate
-async function ensureAudio() {
-  try { audioEl.muted = false; audioEl.volume = 1.0; await audioEl.play(); gateEl.style.display = "none"; }
-  catch { gateEl.style.display = "flex"; }
-}
-gateBtn.addEventListener("click", ensureAudio);
+      <div class="ctrl-row">
+        <button id="startBtn">Start</button>
+        <button id="stopBtn" disabled>Stop</button>
+        <button id="enableBtn" class="gate" disabled>Enable Audio</button>
+        <button id="disableBtn" class="gate" disabled>Disable Audio</button>
+      </div>
 
-// Start/Stop session
-async function startSession() {
-  // hide placeholder when starting
-  placeholderEl.style.display = "none";
+      <div class="ctrl-row">
+        <textarea id="promptTxt" placeholder="Type a prompt to speak…"></textarea>
+        <button id="speakBtn" disabled>Speak</button>
+      </div>
+    </section>
 
-  const body = {
-    avatar_id: window.HEYGEN_FIXED?.avatar_id || "June_HR_public",
-    voice_id:  window.HEYGEN_FIXED?.voice_id  || "68dedac41a9f46a6a4271a95c733823c",
-    pose_name: window.HEYGEN_FIXED?.pose_name || "June HR"
-  };
-  await flog("viewer", "Start button pressed", body);
-  setStatus("requesting viewer params…");
+    <!-- Debug Console -->
+    <section class="debug">
+      <div class="debug-head">
+        <div>Debug Console</div>
+        <button id="clearLogBtn" type="button">Clear</button>
+      </div>
+      <textarea id="debugLog" spellcheck="false" readonly></textarea>
+    </section>
+  </main>
 
-  let j = null;
-  try {
-    const r = await fetch(`${window.API_BASE}/api/start-session`, {
-      method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body)
-    });
-    j = await r.json().catch(()=>({}));
-    await flog("viewer", "/api/start-session response", { http: r.status, body: j });
-    if (r.status >= 400 || !j.offer_sdp) throw new Error("start-session failed or no offer_sdp");
-  } catch (e) {
-    await flog("viewer", "start-session failed", { err: String(e) }, "ERROR");
-    setStatus("init error (start-session)");
-    // show placeholder back on error
-    placeholderEl.style.display = "";
-    return;
-  }
+  <!-- Runtime API base (local vs production) -->
+  <script>
+    (function(){
+      const params = new URLSearchParams(location.search);
+      const override = params.get("api");
+      if (override) { window.API_BASE = override; return; }
 
-  nameEl.textContent = j.avatar_name || "—";
-  SESSION_ID    = j.session_id;
-  SESSION_TOKEN = j.session_token;
-  OFFER_SDP     = j.offer_sdp;
-  RTC_CONFIG    = j.rtc_config || RTC_CONFIG;
-
-  try {
-    if (pc) { try { pc.close(); } catch {} }
-    pc = new RTCPeerConnection(RTC_CONFIG);
-    pc.addTransceiver("audio", { direction: "recvonly" });
-    pc.addTransceiver("video", { direction: "recvonly" });
-
-    pc.ontrack = (ev) => {
-      const [stream] = ev.streams || [];
-      if (!stream) return;
-      if (ev.track.kind === "video") {
-        videoEl.srcObject = stream; videoEl.muted = true; videoEl.play().catch(()=>{});
-      } else if (ev.track.kind === "audio") {
-        audioEl.srcObject = stream; setTimeout(ensureAudio, 100);
+      const isLocal = location.protocol === "file:" ||
+                      location.hostname === "localhost" ||
+                      location.hostname.startsWith("127.");
+      if (!window.API_BASE || typeof window.API_BASE !== "string" || !window.API_BASE.trim()) {
+        window.API_BASE = isLocal
+          ? "http://localhost:8000"
+          : location.origin; // ← same-origin in Render/production
       }
-    };
+    })();
+  </script>
 
-    setStatus("applying offer…");
-    await pc.setRemoteDescription({ type: "offer", sdp: OFFER_SDP });
+  <script src="./perfume.js"></script>
 
-    setStatus("creating answer…");
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    await new Promise(res => {
-      if (pc.iceGatheringState === "complete") return res();
-      const h = () => { if (pc.iceGatheringState === "complete") { pc.removeEventListener("icegatheringstatechange", h); res(); } };
-      pc.addEventListener("icegatheringstatechange", h);
-      setTimeout(res, 1500);
+  <!-- Optional auto-start (comment out to require manual Start) -->
+  <script>
+    window.addEventListener("load", () => {
+      if (typeof window.__startSession === "function") {
+        // window.__startSession();
+      }
     });
-
-    setStatus("starting on HeyGen…");
-    const fd = new FormData();
-    fd.append("session_id",    SESSION_ID);
-    fd.append("session_token", SESSION_TOKEN);
-    fd.append("answer_sdp",    pc.localDescription.sdp);
-
-    const rStart = await fetch(`${window.API_BASE}/api/heygen/start`, { method: "POST", body: fd });
-    const jStart = await rStart.json().catch(()=>({}));
-    await flog("viewer", "/api/heygen/start response", { http: rStart.status, body: jStart });
-    if (rStart.status >= 400) throw new Error("heygen.start failed");
-
-    setStatus("waiting for media…");
-    gateEl.style.display = "flex";
-  } catch (e) {
-    await flog("viewer", "webrtc/start error", { err: String(e) }, "ERROR");
-    setStatus("init error (webrtc)");
-    placeholderEl.style.display = "";
-  }
-}
-
-async function stopSession() {
-  await flog("viewer", "Stop button pressed");
-  try {
-    const r = await fetch(`${window.API_BASE}/api/stop-session`, { method: "POST" });
-    const j = await r.json().catch(()=>({}));
-    await flog("viewer", "/api/stop-session response", { http: r.status, body: j });
-  } catch (e) {
-    await flog("viewer", "stop-session error", { err: String(e) }, "ERROR");
-  }
-  if (pc) { try { pc.close(); } catch {} pc = null; }
-  // show placeholder after stop
-  placeholderEl.style.display = "";
-  setStatus("stopped.");
-}
-window.addEventListener("beforeunload", () => {
-  try { navigator.sendBeacon(`${window.API_BASE}/api/stop-session`, new FormData()); } catch {}
-});
-window.__startSession = startSession;
-startBtn.addEventListener("click", startSession);
-stopBtn.addEventListener("click", stopSession);
-
-// Send to avatar
-sendBtn.addEventListener("click", async () => {
-  const text = (editBox.value || "").trim();
-  if (!text) return;
-  if (!(SESSION_ID && SESSION_TOKEN)) { setStatus("Start session first."); return; }
-
-  const payload = { session_id: SESSION_ID, session_token: SESSION_TOKEN, text };
-  await flog("viewer", "Send to avatar clicked", { text_len: text.length });
-
-  const r = await fetch(`${window.API_BASE}/api/send-task`, {
-    method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload)
-  });
-  const j = await r.json().catch(()=>({}));
-  await flog("viewer", "/api/send-task response", { http: r.status, body: j });
-});
-
-// Instruction
-instrBtn.addEventListener("click", async () => {
-  const msg = "To speak to me, press 🎙️ Rec, pause a second and then speak. Press 🛑 End when finished.";
-  editBox.value = msg;
-  await flog("viewer", "Instruction pressed", { text: msg });
-  sendBtn.click();
-});
-
-// ChatGPT passthrough (unchanged behavior)
-gptBtn.addEventListener("click", async () => {
-  const text = (editBox.value || "").trim();
-  const fd = new FormData(); fd.append("text", text || "Hello");
-  await flog("chatgpt", "Send to ChatGPT pressed", { text_len: (text||"").length });
-
-  try {
-    const r = await fetch(`${window.API_BASE}/api/chat`, { method: "POST", body: fd });
-    const j = await r.json();
-    await flog("chatgpt", "/api/chat response", { http: r.status, body_len: (j?.response || "").length });
-
-    const reply = (j.response || "").trim();
-    if (reply) {
-      editBox.value = reply;
-      if (SESSION_ID && SESSION_TOKEN) {
-        const payload = { session_id: SESSION_ID, session_token: SESSION_TOKEN, text: reply };
-        fetch(`${window.API_BASE}/api/send-task`, {
-          method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload)
-        }).catch(()=>{});
-      }
-    }
-    setStatus("Ready.");
-  } catch (e) {
-    await flog("chatgpt", "error", { err: String(e) }, "ERROR");
-    setStatus("OpenAI error");
-  }
-});
-
-// Mic + transcription (toggle labels Rec/End)
-let mediaRecorder = null, chunks = [], audioCtx = null, analyser = null, sourceNode = null, raf = 0;
-
-function chooseMime() {
-  const c = [
-    "audio/webm;codecs=opus","audio/webm",
-    "audio/ogg;codecs=opus","audio/ogg",
-    "audio/mp4","audio/mpeg"
-  ];
-  for (const m of c) { if (MediaRecorder.isTypeSupported(m)) return m; }
-  return "";
-}
-
-async function startRecording() {
-  await flog("mic", "Mic pressed");
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-    });
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = audioCtx.createAnalyser(); analyser.fftSize = 2048;
-    sourceNode = audioCtx.createMediaStreamSource(stream); sourceNode.connect(analyser);
-
-    const mimeType = chooseMime(); chunks = [];
-    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
-    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-
-    mediaRecorder.onstop = async () => {
-      cancelAnimationFrame(raf); if (sourceNode) try { sourceNode.disconnect(); } catch {}
-      try {
-        const blob = new Blob(chunks, { type: mediaRecorder.mimeType || mimeType || "audio/webm" });
-        const ext  = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg"
-                    : blob.type.includes("mpeg") ? "mp3" : "webm";
-        const fd = new FormData(); fd.append("file", new File([blob], `rec.${ext}`, { type: blob.type }));
-        await flog("mic", "sending to /api/transcribe", { type: blob.type, size: blob.size });
-        const r = await fetch(`${window.API_BASE}/api/transcribe`, { method: "POST", body: fd });
-        const j = await r.json().catch(()=>({}));
-        await flog("mic", "/api/transcribe response", { http: r.status, body: j });
-        if (j && j.text) editBox.value = j.text;
-        setStatus("Ready.");
-      } catch (e) {
-        setStatus(`Transcription error: ${e?.message || e}`);
-      } finally {
-        stream.getTracks().forEach(t => t.stop()); mediaRecorder = null;
-        micBtn.textContent = "🎙️ Rec"; micBtn.classList.remove("recording");
-      }
-    };
-
-    mediaRecorder.start(150);
-    setStatus("Listening… press 🛑 End to stop");
-    micBtn.classList.add("recording");
-    micBtn.textContent = "🛑 End";
-
-    const tick = () => { raf = requestAnimationFrame(tick); }; tick();
-  } catch (err) {
-    await flog("mic", "permission/error", { err: String(err) }, "ERROR");
-    setStatus(`Mic permission denied / ${err.message || err}`);
-  }
-}
-function stopRecording(){ if (mediaRecorder) { try { mediaRecorder.stop(); } catch {} } }
-micBtn.addEventListener("click", () => { if (mediaRecorder) stopRecording(); else startRecording(); });
-
-// ---------------------------
-// Tiles: single vs double tap
-// ---------------------------
-const perfumeGrid = $("perfumeGrid");
-
-let clickTimer = null;
-let clickCount = 0;
-const DOUBLE_CLICK_DELAY = 300;
-
-// Send the selected perfume name to backend in EN or ZH and then push to avatar
-async function explainPerfume(name, isDouble) {
-  const nm = (name || "").trim(); if (!nm) return;
-
-  // First, place the raw name into the edit box (like before)
-  editBox.value = nm;
-  await flog("tiles", isDouble ? "tile double-click" : "tile single-click", { name: nm });
-
-  // Ask OpenAI for explanation in target language
-  try {
-    setStatus(isDouble ? "获取中文香水说明…" : "Getting perfume details…");
-    const fd = new FormData();
-    fd.append("name", nm);
-    fd.append("is_double_click", String(!!isDouble));
-
-    const r = await fetch(`${window.API_BASE}/api/perfume-explain`, { method: "POST", body: fd });
-    const j = await r.json().catch(()=>({}));
-    await flog("tiles", "/api/perfume-explain response", { http: r.status, body_len: (j && j.response ? j.response.length : 0), lang: j?.lang });
-
-    if (r.status >= 400) { setStatus("OpenAI error (see debug)"); return; }
-
-    const reply = (j && j.response ? j.response : "").trim();
-    if (reply) {
-      editBox.value = reply;
-      if (SESSION_ID && SESSION_TOKEN) {
-        const payload = { session_id: SESSION_ID, session_token: SESSION_TOKEN, text: reply };
-        fetch(`${window.API_BASE}/api/send-task`, {
-          method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload)
-        }).catch(()=>{});
-      }
-    }
-    setStatus("Ready.");
-  } catch (e) {
-    await flog("tiles", "perfume-explain error", { err: String(e) }, "ERROR");
-    setStatus("OpenAI error");
-  }
-}
-
-// Centralized handler that disambiguates single vs. double click/tap
-function handleTilePress(figEl) {
-  const say = figEl.getAttribute("data-say") || figEl.querySelector("figcaption")?.textContent || "";
-  if (!say.trim()) return;
-
-  clickCount++;
-  if (clickCount === 1) {
-    // May be a single click — set a timer
-    clickTimer = setTimeout(() => {
-      clickCount = 0;
-      explainPerfume(say, /*isDouble*/ false); // English
-    }, DOUBLE_CLICK_DELAY);
-  } else if (clickCount === 2) {
-    // Double click arrived within window — cancel single
-    clearTimeout(clickTimer);
-    clickCount = 0;
-    explainPerfume(say, /*isDouble*/ true); // Mandarin
-  }
-}
-
-// Delegate click events to figures
-perfumeGrid.addEventListener("click", (e) => {
-  const fig = e.target.closest(".perfume-item");
-  if (!fig) return;
-  e.preventDefault(); // avoid accidental selections/navigations
-  handleTilePress(fig);
-});
-
-// Add touchstart to improve responsiveness and suppress double-tap zoom
-perfumeGrid.addEventListener("touchstart", (e) => {
-  const fig = e.target.closest(".perfume-item");
-  if (!fig) return;
-  // Prevent double-tap zoom and click delay on some mobile browsers
-  e.preventDefault();
-  handleTilePress(fig);
-}, { passive: false });
-
+  </script>
+</body>
+</html>
