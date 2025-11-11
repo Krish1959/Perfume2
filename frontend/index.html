@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Perfume — Local HTML + FastAPI</title>
+  <title>Perfume — Sales Assistant</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="./perfume.css" />
 </head>
@@ -63,6 +63,22 @@
       </div>
     </section>
 
+    <!-- Mic / Transcription (auto-hidden if backend lacks Whisper) -->
+    <section id="micBlock" class="mic-block" style="display:none">
+      <div class="debug-head">
+        <div>Microphone & Transcription</div>
+        <div class="mic-right">
+          <select id="micDevice"></select>
+          <button id="micStartBtn">Start Mic</button>
+          <button id="micStopBtn" disabled>Stop Mic</button>
+        </div>
+      </div>
+      <div class="mic-row">
+        <label class="mic-label">Live Transcript:</label>
+        <textarea id="micTranscript" spellcheck="false" readonly></textarea>
+      </div>
+    </section>
+
     <!-- Debug Console -->
     <section class="debug">
       <div class="debug-head">
@@ -86,7 +102,7 @@
       if (!window.API_BASE || typeof window.API_BASE !== "string" || !window.API_BASE.trim()) {
         window.API_BASE = isLocal
           ? "http://localhost:8000"
-          : location.origin; // ← same-origin in Render/production
+          : location.origin; // same-origin in Render/production
       }
     })();
   </script>
@@ -95,11 +111,9 @@
 
   <!-- Optional auto-start (comment out to require manual Start) -->
   <script>
-    window.addEventListener("load", () => {
-      if (typeof window.__startSession === "function") {
-        // window.__startSession();
-      }
-    });
+    // window.addEventListener("load", () => {
+    //   if (typeof window.__startSession === "function") window.__startSession();
+    // });
   </script>
 </body>
 </html>
