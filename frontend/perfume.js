@@ -1,28 +1,28 @@
 // -----------------------------------------------------
-// API base: robust selection for local vs Render
+// API base: robust selection for local vs Render (Perfume2)
 (function(){
+  const qsAPI = new URLSearchParams(location.search).get("api");
   const isLocal = location.protocol === "file:" ||
                   location.hostname === "localhost" ||
                   location.hostname.startsWith("127.");
-  if (!window.API_BASE || typeof window.API_BASE !== "string" || !window.API_BASE.trim()) {
-    window.API_BASE = isLocal
-      ? "http://localhost:8000"
-      : location.origin; // same-origin in Render/production
-  }
+  window.API_BASE = (qsAPI && qsAPI.trim()) ||
+                    (isLocal ? "http://localhost:8000" : "https://perfume2-backend.onrender.com");
 })();
 
-// -----------------------------------------------------
-// Utilities
+// Helpers
 function $(id){ return document.getElementById(id); }
 function setStatus(msg){ $("viewerStatus").textContent = msg; }
-function now(){ const d = new Date(); return `[${d.toTimeString().slice(0,8)}]`; }
-function jstr(o){ try{ return JSON.stringify(o); }catch{return String(o);} }
-async function flog(area, message, extra=null, level="INFO"){
-  const line = `${now()} [${area}] ${message} | ${jstr(extra??"")}`;
-  const el = $("debugLog");
-  el.value += (el.value ? "\n" : "") + line;
-  el.scrollTop = el.scrollHeight;
-  // fire-and-forget to backend
+function uiLog(area, message, extra = {}) {
+  try {
+    const box = $("uiDebug");
+    const ts  = new Date().toLocaleTimeString();
+    const line = `[${ts}] [${area}] ${message}` + (Object.keys(extra).length ? ` | ${JSON.stringify(extra)}` : "");
+    box.value += (box.value ? "\n" : "") + line;
+    box.scrollTop = box.scrollHeight;
+  } catch {}
+}
+async function flog(area, message, extra = {}, level = "INFO") {
+  uiLog(area, message, extra);
   try {
     await fetch(`${window.API_BASE}/api/log`, {
       method: "POST", headers: {"Content-Type":"application/json"},
@@ -31,120 +31,62 @@ async function flog(area, message, extra=null, level="INFO"){
   } catch {}
 }
 
-// -----------------------------------------------------
-// Elements
+// Refs
 const nameEl   = $("aname");
 const videoEl  = $("avatarVideo");
 const audioEl  = $("avatarAudio");
+const gateEl   = $("audioGate");
+const gateBtn  = $("enableBtn");
 const placeholderEl = $("avatarPlaceholder");
 
-// Controls
-const startBtn = $("startBtn");
-const stopBtn  = $("stopBtn");
-const enBtn    = $("enableBtn");
-const disBtn   = $("disableBtn");
-const speakBtn = $("speakBtn");
-const promptTxt= $("promptTxt");
+const editBox  = $("editBox");
+const micBtn   = $("btn-mic");
+const sendBtn  = $("btn-send-avatar");
+const instrBtn = $("btn-instruction");
+const gptBtn   = $("btn-chatgpt");
+const startBtn = $("btn-start");
+const stopBtn  = $("btn-stop");
 
-const selAvatar = $("avatarId");
-const selVoice  = $("voiceId");
-const selPose   = $("poseName");
-
-// Mic elements (optional)
-const micBlock  = $("micBlock");
-const micSelect = $("micDevice");
-const micStart  = $("micStartBtn");
-const micStop   = $("micStopBtn");
-const micText   = $("micTranscript");
-
-// -----------------------------------------------------
 // State
-let LIVE = false, AUDIO_ENABLED = false;
-let pc = null;
-let OFFER_SDP = null;
+let SESSION_ID = null, SESSION_TOKEN = null, OFFER_SDP = null, pc = null;
 let RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] };
 
-let HAS_WHISPER = false;  // toggles mic UI
-let micStream = null;
-let mediaRecorder = null;
-let recordTimer = null;
-let chunkMs = 4000;       // 4s chunking to match common Whisper configs
-
-// -----------------------------------------------------
-// Health check (enables mic UI if backend has Whisper)
+// Initial ping
 (async () => {
   try {
-    const r = await fetch(`${window.API_BASE}/api/health`);
-    const j = await r.json().catch(()=>({}));
-    await flog("frontend", "perfume.js loaded", { api_base: window.API_BASE, ping: r.status, health: j });
+    const r = await fetch(`${window.API_BASE}/api/ping`);
+    await flog("frontend", "perfume.js loaded", { api_base: window.API_BASE, ping: r.status });
     setStatus("Ready.");
-    if (j && (j.has_whisper || j.hasWhisper)) {
-      HAS_WHISPER = true;
-      micBlock.style.display = "";
-      await populateDevices();
-    }
   } catch (e) {
-    await flog("frontend", "perfume.js init failed", { err: String(e) }, "ERROR");
-    setStatus("init error");
+    await flog("frontend", "perfume.js load error", { err: String(e), api_base: window.API_BASE }, "ERROR");
+    setStatus("Backend not reachable at " + window.API_BASE);
   }
 })();
 
-// -----------------------------------------------------
-// UI helpers
-function showPlaceholder(show){
-  placeholderEl.style.display = show ? "flex" : "none";
-  videoEl.style.display = show ? "none" : "block";
+// Audio gate
+async function ensureAudio() {
+  try { audioEl.muted = false; audioEl.volume = 1.0; await audioEl.play(); gateEl.style.display = "none"; }
+  catch { gateEl.style.display = "flex"; }
 }
-function setLive(on){
-  LIVE = on;
-  startBtn.disabled = on;
-  stopBtn.disabled = !on;
-  speakBtn.disabled = !on;
-  enBtn.disabled = !on || AUDIO_ENABLED;
-  disBtn.disabled = !on || !AUDIO_ENABLED;
-  if (!on) {
-    audioEl.srcObject = null;
-    videoEl.srcObject = null;
-    showPlaceholder(true);
-  }
-}
+gateBtn.addEventListener("click", ensureAudio);
 
-// -----------------------------------------------------
-// WebRTC helpers
-function newPC(){
-  if (pc) try { pc.close(); } catch {}
-  pc = new RTCPeerConnection(RTC_CONFIG);
-  pc.onicecandidate = (_ev)=>{ /* trickle=false on server; ignore */ };
-  pc.ontrack = (ev)=>{
-    if (ev.track.kind === "video") {
-      videoEl.srcObject = ev.streams[0];
-    } else if (ev.track.kind === "audio") {
-      audioEl.srcObject = ev.streams[0];
-    }
+// Start/Stop session
+async function startSession() {
+  // hide placeholder when starting
+  placeholderEl.style.display = "none";
+
+  const body = {
+    avatar_id: window.HEYGEN_FIXED?.avatar_id || "June_HR_public",
+    voice_id:  window.HEYGEN_FIXED?.voice_id  || "68dedac41a9f46a6a4271a95c733823c",
+    pose_name: window.HEYGEN_FIXED?.pose_name || "June HR"
   };
-  return pc;
-}
-
-// -----------------------------------------------------
-// Viewer flow
-async function startViewer(){
-  setStatus("starting session…");
-  nameEl.textContent = "—";
-  setLive(false);
-  showPlaceholder(true);
-
-  const FIXED = {
-    avatar_id: selAvatar.value || "June_HR_public",
-    voice_id:  selVoice.value  || "68dedac41a9f46a6a4271a95c733823c",
-    pose_name: selPose.value   || "June HR"
-  };
-  await flog("viewer", "Start button pressed", FIXED);
+  await flog("viewer", "Start button pressed", body);
   setStatus("requesting viewer params…");
 
   let j = null;
   try {
     const r = await fetch(`${window.API_BASE}/api/start-session`, {
-      method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(FIXED)
+      method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body)
     });
     j = await r.json().catch(()=>({}));
     await flog("viewer", "/api/start-session response", { http: r.status, body: j });
@@ -152,202 +94,279 @@ async function startViewer(){
   } catch (e) {
     await flog("viewer", "start-session failed", { err: String(e) }, "ERROR");
     setStatus("init error (start-session)");
-    showPlaceholder(true);
+    // show placeholder back on error
+    placeholderEl.style.display = "";
     return;
   }
 
-  OFFER_SDP = j.offer_sdp;
-  nameEl.textContent = j.avatar_name || selAvatar.value || "—";
+  nameEl.textContent = j.avatar_name || "—";
+  SESSION_ID    = j.session_id;
+  SESSION_TOKEN = j.session_token;
+  OFFER_SDP     = j.offer_sdp;
+  RTC_CONFIG    = j.rtc_config || RTC_CONFIG;
 
-  // Build peer connection
-  setStatus("creating peer connection…");
-  newPC();
-  const offer = { type: "offer", sdp: OFFER_SDP };
-  await pc.setRemoteDescription(offer);
-
-  // Add recv-only tracks
-  pc.addTransceiver("video", { direction: "recvonly" });
-  pc.addTransceiver("audio", { direction: "recvonly" });
-
-  setStatus("creating local answer…");
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-
-  const body = { answer_sdp: pc.localDescription.sdp };
-  let join = null;
   try {
-    const r = await fetch(`${window.API_BASE}/api/join-session`, {
-      method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(body)
-    });
-    join = await r.json().catch(()=>({}));
-    await flog("viewer", "/api/join-session response", { http: r.status, body: join });
-    if (r.status >= 400 || !join.success) throw new Error("join-session failed");
-  } catch (e) {
-    await flog("viewer", "join-session failed", { err: String(e) }, "ERROR");
-    setStatus("init error (join-session)");
-    showPlaceholder(true);
-    try { pc.close(); } catch {}
-    return;
-  }
+    if (pc) { try { pc.close(); } catch {} }
+    pc = new RTCPeerConnection(RTC_CONFIG);
+    pc.addTransceiver("audio", { direction: "recvonly" });
+    pc.addTransceiver("video", { direction: "recvonly" });
 
-  // Live!
-  setLive(true);
-  AUDIO_ENABLED = false;
-  enBtn.disabled = false; disBtn.disabled = true;
-  audioEl.muted = true; // start muted until user enables
-  setStatus("Live (audio disabled). Click Enable Audio to hear the avatar.");
-  showPlaceholder(false);
-}
-
-async function stopViewer(){
-  setLive(false);
-  setStatus("stopping…");
-  try {
-    await fetch(`${window.API_BASE}/api/stop-session`, { method: "POST" });
-  } catch {}
-  try { pc && pc.close(); } catch {}
-  pc = null;
-  setStatus("Stopped.");
-}
-
-// -----------------------------------------------------
-// Audio gate (for avatar playback)
-enBtn.addEventListener("click", async ()=>{
-  AUDIO_ENABLED = true;
-  enBtn.disabled = true;
-  disBtn.disabled = false;
-  audioEl.muted = false;
-  await flog("viewer", "Audio enabled");
-  setStatus("Live (audio ON).");
-});
-disBtn.addEventListener("click", async ()=>{
-  AUDIO_ENABLED = false;
-  enBtn.disabled = false;
-  disBtn.disabled = true;
-  audioEl.muted = true;
-  await flog("viewer", "Audio disabled");
-  setStatus("Live (audio OFF).");
-});
-
-// -----------------------------------------------------
-// Speak (TTS from typed text via backend)
-speakBtn.addEventListener("click", async ()=>{
-  const text = (promptTxt.value || "").trim();
-  if (!text) return;
-  await flog("viewer", "Speak clicked", { text_len: text.length });
-  try {
-    const r = await fetch(`${window.API_BASE}/api/speak`, {
-      method: "POST", headers: {"Content-Type":"application/json"},
-      body: JSON.stringify({ text })
-    });
-    const j = await r.json().catch(()=>({}));
-    await flog("viewer", "/api/speak response", { http: r.status, body: j });
-    if (r.status >= 400) throw new Error("speak failed");
-  } catch (e) {
-    await flog("viewer", "speak failed", { err: String(e) }, "ERROR");
-  }
-});
-
-// -----------------------------------------------------
-// Buttons
-startBtn.addEventListener("click", startViewer);
-stopBtn.addEventListener("click", stopViewer);
-
-// Clear log
-$("clearLogBtn").addEventListener("click", ()=>{
-  $("debugLog").value = "";
-});
-
-// Expose for optional auto-start
-window.__startSession = startViewer;
-
-// -----------------------------------------------------
-// Microphone / Transcription support (only if backend has Whisper)
-async function populateDevices(){
-  try{
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const audioInputs = devices.filter(d => d.kind === "audioinput");
-    micSelect.innerHTML = "";
-    audioInputs.forEach(d=>{
-      const o = document.createElement("option");
-      o.value = d.deviceId; o.textContent = d.label || `Mic ${micSelect.length+1}`;
-      micSelect.appendChild(o);
-    });
-  } catch(e){
-    await flog("mic", "enumerateDevices failed", { err: String(e) }, "ERROR");
-  }
-}
-
-async function startMic(){
-  if (!HAS_WHISPER) return;
-  micStart.disabled = true;
-  micStop.disabled = false;
-  micText.value = "";
-
-  try{
-    const constraints = { audio: { deviceId: micSelect.value ? { exact: micSelect.value } : undefined } };
-    micStream = await navigator.mediaDevices.getUserMedia(constraints);
-  } catch(e){
-    await flog("mic", "getUserMedia failed", { err: String(e) }, "ERROR");
-    micStart.disabled = false; micStop.disabled = true;
-    return;
-  }
-
-  try{
-    mediaRecorder = new MediaRecorder(micStream, { mimeType: "audio/webm" });
-  } catch(e){
-    await flog("mic", "MediaRecorder init failed", { err: String(e) }, "ERROR");
-    micStart.disabled = false; micStop.disabled = true;
-    return;
-  }
-
-  mediaRecorder.ondataavailable = async (ev)=>{
-    if (!ev.data || !ev.data.size) return;
-    try{
-      const blob = ev.data;
-      const form = new FormData();
-      form.append("chunk", blob, "chunk.webm");
-      const r = await fetch(`${window.API_BASE}/api/transcribe-chunk`, { method: "POST", body: form });
-      const j = await r.json().catch(()=>({}));
-      await flog("mic", "/api/transcribe-chunk response", { http: r.status, body: j });
-      if (j && j.text) {
-        micText.value += (micText.value ? "\n" : "") + j.text;
-        micText.scrollTop = micText.scrollHeight;
+    pc.ontrack = (ev) => {
+      const [stream] = ev.streams || [];
+      if (!stream) return;
+      if (ev.track.kind === "video") {
+        videoEl.srcObject = stream; videoEl.muted = true; videoEl.play().catch(()=>{});
+      } else if (ev.track.kind === "audio") {
+        audioEl.srcObject = stream; setTimeout(ensureAudio, 100);
       }
-    } catch(e){
-      await flog("mic", "transcribe-chunk failed", { err: String(e) }, "ERROR");
-    }
-  };
+    };
 
-  mediaRecorder.start(); // start stream
-  // cycle requestData every chunkMs
-  recordTimer = setInterval(()=>{
-    if (mediaRecorder && mediaRecorder.state === "recording") {
-      try { mediaRecorder.requestData(); } catch {}
-    }
-  }, chunkMs);
+    setStatus("applying offer…");
+    await pc.setRemoteDescription({ type: "offer", sdp: OFFER_SDP });
 
-  await flog("mic", "mic started", { device: micSelect.value, chunk_ms: chunkMs });
+    setStatus("creating answer…");
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    await new Promise(res => {
+      if (pc.iceGatheringState === "complete") return res();
+      const h = () => { if (pc.iceGatheringState === "complete") { pc.removeEventListener("icegatheringstatechange", h); res(); } };
+      pc.addEventListener("icegatheringstatechange", h);
+      setTimeout(res, 1500);
+    });
+
+    setStatus("starting on HeyGen…");
+    const fd = new FormData();
+    fd.append("session_id",    SESSION_ID);
+    fd.append("session_token", SESSION_TOKEN);
+    fd.append("answer_sdp",    pc.localDescription.sdp);
+
+    const rStart = await fetch(`${window.API_BASE}/api/heygen/start`, { method: "POST", body: fd });
+    const jStart = await rStart.json().catch(()=>({}));
+    await flog("viewer", "/api/heygen/start response", { http: rStart.status, body: jStart });
+    if (rStart.status >= 400) throw new Error("heygen.start failed");
+
+    setStatus("waiting for media…");
+    gateEl.style.display = "flex";
+  } catch (e) {
+    await flog("viewer", "webrtc/start error", { err: String(e) }, "ERROR");
+    setStatus("init error (webrtc)");
+    placeholderEl.style.display = "";
+  }
 }
 
-async function stopMic(){
-  try{
-    if (recordTimer) { clearInterval(recordTimer); recordTimer = null; }
-    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
-  } catch {}
-  try{
-    if (micStream) micStream.getTracks().forEach(t => t.stop());
-  } catch {}
-  micStream = null; mediaRecorder = null;
-  micStart.disabled = false; micStop.disabled = true;
-  await flog("mic", "mic stopped");
+async function stopSession() {
+  await flog("viewer", "Stop button pressed");
+  try {
+    const r = await fetch(`${window.API_BASE}/api/stop-session`, { method: "POST" });
+    const j = await r.json().catch(()=>({}));
+    await flog("viewer", "/api/stop-session response", { http: r.status, body: j });
+  } catch (e) {
+    await flog("viewer", "stop-session error", { err: String(e) }, "ERROR");
+  }
+  if (pc) { try { pc.close(); } catch {} pc = null; }
+  // show placeholder after stop
+  placeholderEl.style.display = "";
+  setStatus("stopped.");
 }
-
-micStart.addEventListener("click", startMic);
-micStop.addEventListener("click", stopMic);
-
-// refresh devices on permission grant
-navigator.mediaDevices && navigator.mediaDevices.addEventListener &&
-navigator.mediaDevices.addEventListener("devicechange", async()=>{
-  if (HAS_WHISPER) await populateDevices();
+window.addEventListener("beforeunload", () => {
+  try { navigator.sendBeacon(`${window.API_BASE}/api/stop-session`, new FormData()); } catch {}
 });
+window.__startSession = startSession;
+startBtn.addEventListener("click", startSession);
+stopBtn.addEventListener("click", stopSession);
+
+// Send to avatar
+sendBtn.addEventListener("click", async () => {
+  const text = (editBox.value || "").trim();
+  if (!text) return;
+  if (!(SESSION_ID && SESSION_TOKEN)) { setStatus("Start session first."); return; }
+
+  const payload = { session_id: SESSION_ID, session_token: SESSION_TOKEN, text };
+  await flog("viewer", "Send to avatar clicked", { text_len: text.length });
+
+  const r = await fetch(`${window.API_BASE}/api/send-task`, {
+    method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload)
+  });
+  const j = await r.json().catch(()=>({}));
+  await flog("viewer", "/api/send-task response", { http: r.status, body: j });
+});
+
+// Instruction
+instrBtn.addEventListener("click", async () => {
+  const msg = "To speak to me, press 🎙️ Rec, pause a second and then speak. Press 🛑 End when finished.";
+  editBox.value = msg;
+  await flog("viewer", "Instruction pressed", { text: msg });
+  sendBtn.click();
+});
+
+// ChatGPT passthrough (unchanged behavior)
+gptBtn.addEventListener("click", async () => {
+  const text = (editBox.value || "").trim();
+  const fd = new FormData(); fd.append("text", text || "Hello");
+  await flog("chatgpt", "Send to ChatGPT pressed", { text_len: (text||"").length });
+
+  try {
+    const r = await fetch(`${window.API_BASE}/api/chat`, { method: "POST", body: fd });
+    const j = await r.json();
+    await flog("chatgpt", "/api/chat response", { http: r.status, body_len: (j?.response || "").length });
+
+    const reply = (j.response || "").trim();
+    if (reply) {
+      editBox.value = reply;
+      if (SESSION_ID && SESSION_TOKEN) {
+        const payload = { session_id: SESSION_ID, session_token: SESSION_TOKEN, text: reply };
+        fetch(`${window.API_BASE}/api/send-task`, {
+          method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload)
+        }).catch(()=>{});
+      }
+    }
+    setStatus("Ready.");
+  } catch (e) {
+    await flog("chatgpt", "error", { err: String(e) }, "ERROR");
+    setStatus("OpenAI error");
+  }
+});
+
+// Mic + transcription (toggle labels Rec/End)
+let mediaRecorder = null, chunks = [], audioCtx = null, analyser = null, sourceNode = null, raf = 0;
+
+function chooseMime() {
+  const c = [
+    "audio/webm;codecs=opus","audio/webm",
+    "audio/ogg;codecs=opus","audio/ogg",
+    "audio/mp4","audio/mpeg"
+  ];
+  for (const m of c) { if (MediaRecorder.isTypeSupported(m)) return m; }
+  return "";
+}
+
+async function startRecording() {
+  await flog("mic", "Mic pressed");
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser(); analyser.fftSize = 2048;
+    sourceNode = audioCtx.createMediaStreamSource(stream); sourceNode.connect(analyser);
+
+    const mimeType = chooseMime(); chunks = [];
+    mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+
+    mediaRecorder.onstop = async () => {
+      cancelAnimationFrame(raf); if (sourceNode) try { sourceNode.disconnect(); } catch {}
+      try {
+        const blob = new Blob(chunks, { type: mediaRecorder.mimeType || mimeType || "audio/webm" });
+        const ext  = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg"
+                    : blob.type.includes("mpeg") ? "mp3" : "webm";
+        const fd = new FormData(); fd.append("file", new File([blob], `rec.${ext}`, { type: blob.type }));
+        await flog("mic", "sending to /api/transcribe", { type: blob.type, size: blob.size });
+        const r = await fetch(`${window.API_BASE}/api/transcribe`, { method: "POST", body: fd });
+        const j = await r.json().catch(()=>({}));
+        await flog("mic", "/api/transcribe response", { http: r.status, body: j });
+        if (j && j.text) editBox.value = j.text;
+        setStatus("Ready.");
+      } catch (e) {
+        setStatus(`Transcription error: ${e?.message || e}`);
+      } finally {
+        stream.getTracks().forEach(t => t.stop()); mediaRecorder = null;
+        micBtn.textContent = "🎙️ Rec"; micBtn.classList.remove("recording");
+      }
+    };
+
+    mediaRecorder.start(150);
+    setStatus("Listening… press 🛑 End to stop");
+    micBtn.classList.add("recording");
+    micBtn.textContent = "🛑 End";
+
+    const tick = () => { raf = requestAnimationFrame(tick); }; tick();
+  } catch (err) {
+    await flog("mic", "permission/error", { err: String(err) }, "ERROR");
+    setStatus(`Mic permission denied / ${err.message || err}`);
+  }
+}
+function stopRecording(){ if (mediaRecorder) { try { mediaRecorder.stop(); } catch {} } }
+micBtn.addEventListener("click", () => { if (mediaRecorder) stopRecording(); else startRecording(); });
+
+// -------- Perfume tiles: single vs double click -> EN vs ZH --------
+async function explainPerfumeLang(name, lang) {
+  const nm = (name || "").trim(); if (!nm) return;
+
+  editBox.value = nm;
+  await flog("tiles", "tile pressed", { name: nm, lang });
+
+  if (SESSION_ID && SESSION_TOKEN) {
+    const payload = { session_id: SESSION_ID, session_token: SESSION_TOKEN, text: nm };
+    fetch(`${window.API_BASE}/api/send-task`, {
+      method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload)
+    }).catch(()=>{});
+  }
+
+  try {
+    setStatus("Getting perfume details…");
+    const fd = new FormData();
+    fd.append("name", nm);
+    fd.append("lang", lang || "en"); // backend switches prompts
+    fd.append("is_double_click", String(lang === "zh")); // specimen-style flag (harmless when "false")
+
+    const r = await fetch(`${window.API_BASE}/api/perfume-explain`, { method: "POST", body: fd });
+    const j = await r.json().catch(()=>({}));
+    await flog("tiles", "/api/perfume-explain response",
+      { http: r.status, body_len: (j && j.response ? j.response.length : 0), lang });
+
+    if (r.status >= 400) { setStatus("OpenAI error (see debug)"); return; }
+
+    const reply = (j && j.response ? j.response : "").trim();
+    if (reply) {
+      editBox.value = reply;
+      if (SESSION_ID && SESSION_TOKEN) {
+        const payload = { session_id: SESSION_ID, session_token: SESSION_TOKEN, text: reply };
+        fetch(`${window.API_BASE}/api/send-task`, {
+          method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload)
+        }).catch(()=>{});
+      }
+    }
+    setStatus("Ready.");
+  } catch (e) {
+    await flog("tiles", "perfume-explain error", { err: String(e) }, "ERROR");
+    setStatus("OpenAI error");
+  }
+}
+
+// Back-compat: function used by other code paths
+async function explainPerfume(name) {
+  return explainPerfumeLang(name, "en");
+}
+
+// Single-vs-double click using 300ms window (mobile-friendly)
+(function setupTileClicks(){
+  const grid = $("perfumeGrid");
+  let clickTimer = null;
+  let clickCount = 0;
+  const DOUBLE_CLICK_DELAY = 300;
+
+  grid.addEventListener("click", (e) => {
+    const fig = e.target.closest(".perfume-item"); if (!fig) return;
+    const say = fig.getAttribute("data-say") || fig.querySelector("figcaption")?.textContent || "";
+    if (!say.trim()) return;
+
+    clickCount++;
+    if (clickCount === 1) {
+      clickTimer = setTimeout(() => {
+        clickCount = 0;
+        explainPerfumeLang(say, "en"); // single -> English
+      }, DOUBLE_CLICK_DELAY);
+    } else if (clickCount === 2) {
+      clearTimeout(clickTimer);
+      clickCount = 0;
+      explainPerfumeLang(say, "zh");  // double -> Mandarin
+    }
+  });
+
+  // Help avoid double-tap zoom delay on mobile (like your specimen)
+  grid.addEventListener("touchstart", (e) => {
+    if (e.target.closest(".perfume-item")) e.preventDefault();
+  }, { passive: false });
+})();
