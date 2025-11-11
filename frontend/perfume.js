@@ -7,11 +7,12 @@
   if (!window.API_BASE || typeof window.API_BASE !== "string" || !window.API_BASE.trim()) {
     window.API_BASE = isLocal
       ? "http://localhost:8000"
-      : location.origin; // ← same-origin in Render/production
+      : location.origin; // same-origin in Render/production
   }
 })();
 
-// Helpers
+// -----------------------------------------------------
+// Utilities
 function $(id){ return document.getElementById(id); }
 function setStatus(msg){ $("viewerStatus").textContent = msg; }
 function now(){ const d = new Date(); return `[${d.toTimeString().slice(0,8)}]`; }
@@ -21,6 +22,7 @@ async function flog(area, message, extra=null, level="INFO"){
   const el = $("debugLog");
   el.value += (el.value ? "\n" : "") + line;
   el.scrollTop = el.scrollHeight;
+  // fire-and-forget to backend
   try {
     await fetch(`${window.API_BASE}/api/log`, {
       method: "POST", headers: {"Content-Type":"application/json"},
@@ -29,12 +31,11 @@ async function flog(area, message, extra=null, level="INFO"){
   } catch {}
 }
 
-// Refs
+// -----------------------------------------------------
+// Elements
 const nameEl   = $("aname");
 const videoEl  = $("avatarVideo");
 const audioEl  = $("avatarAudio");
-const gateEl   = $("audioGate");
-const gateBtn  = $("enableBtn");
 const placeholderEl = $("avatarPlaceholder");
 
 // Controls
@@ -49,23 +50,46 @@ const selAvatar = $("avatarId");
 const selVoice  = $("voiceId");
 const selPose   = $("poseName");
 
+// Mic elements (optional)
+const micBlock  = $("micBlock");
+const micSelect = $("micDevice");
+const micStart  = $("micStartBtn");
+const micStop   = $("micStopBtn");
+const micText   = $("micTranscript");
+
+// -----------------------------------------------------
 // State
 let LIVE = false, AUDIO_ENABLED = false;
-let LOCAL_DESC = null, OFFER_SDP = null, pc = null;
+let pc = null;
+let OFFER_SDP = null;
 let RTC_CONFIG = { iceServers: [{ urls: ["stun:stun.l.google.com:19302"] }] };
 
-// Initial health check (use /api/health; your perfume2 backend has this)
+let HAS_WHISPER = false;  // toggles mic UI
+let micStream = null;
+let mediaRecorder = null;
+let recordTimer = null;
+let chunkMs = 4000;       // 4s chunking to match common Whisper configs
+
+// -----------------------------------------------------
+// Health check (enables mic UI if backend has Whisper)
 (async () => {
   try {
     const r = await fetch(`${window.API_BASE}/api/health`);
-    await flog("frontend", "perfume.js loaded", { api_base: window.API_BASE, ping: r.status });
+    const j = await r.json().catch(()=>({}));
+    await flog("frontend", "perfume.js loaded", { api_base: window.API_BASE, ping: r.status, health: j });
     setStatus("Ready.");
+    if (j && (j.has_whisper || j.hasWhisper)) {
+      HAS_WHISPER = true;
+      micBlock.style.display = "";
+      await populateDevices();
+    }
   } catch (e) {
     await flog("frontend", "perfume.js init failed", { err: String(e) }, "ERROR");
     setStatus("init error");
   }
 })();
 
+// -----------------------------------------------------
 // UI helpers
 function showPlaceholder(show){
   placeholderEl.style.display = show ? "flex" : "none";
@@ -85,11 +109,12 @@ function setLive(on){
   }
 }
 
-// WebRTC utils
+// -----------------------------------------------------
+// WebRTC helpers
 function newPC(){
   if (pc) try { pc.close(); } catch {}
   pc = new RTCPeerConnection(RTC_CONFIG);
-  pc.onicecandidate = (ev)=>{ /* backend uses trickle=false, so we ignore */ };
+  pc.onicecandidate = (_ev)=>{ /* trickle=false on server; ignore */ };
   pc.ontrack = (ev)=>{
     if (ev.track.kind === "video") {
       videoEl.srcObject = ev.streams[0];
@@ -100,6 +125,8 @@ function newPC(){
   return pc;
 }
 
+// -----------------------------------------------------
+// Viewer flow
 async function startViewer(){
   setStatus("starting session…");
   nameEl.textContent = "—";
@@ -139,8 +166,8 @@ async function startViewer(){
   await pc.setRemoteDescription(offer);
 
   // Add recv-only tracks
-  const vTransceiver = pc.addTransceiver("video", { direction: "recvonly" });
-  const aTransceiver = pc.addTransceiver("audio", { direction: "recvonly" });
+  pc.addTransceiver("video", { direction: "recvonly" });
+  pc.addTransceiver("audio", { direction: "recvonly" });
 
   setStatus("creating local answer…");
   const answer = await pc.createAnswer();
@@ -167,6 +194,7 @@ async function startViewer(){
   setLive(true);
   AUDIO_ENABLED = false;
   enBtn.disabled = false; disBtn.disabled = true;
+  audioEl.muted = true; // start muted until user enables
   setStatus("Live (audio disabled). Click Enable Audio to hear the avatar.");
   showPlaceholder(false);
 }
@@ -182,7 +210,8 @@ async function stopViewer(){
   setStatus("Stopped.");
 }
 
-// Audio gate (unmute/mute tag)
+// -----------------------------------------------------
+// Audio gate (for avatar playback)
 enBtn.addEventListener("click", async ()=>{
   AUDIO_ENABLED = true;
   enBtn.disabled = true;
@@ -200,7 +229,8 @@ disBtn.addEventListener("click", async ()=>{
   setStatus("Live (audio OFF).");
 });
 
-// Speak
+// -----------------------------------------------------
+// Speak (TTS from typed text via backend)
 speakBtn.addEventListener("click", async ()=>{
   const text = (promptTxt.value || "").trim();
   if (!text) return;
@@ -218,6 +248,7 @@ speakBtn.addEventListener("click", async ()=>{
   }
 });
 
+// -----------------------------------------------------
 // Buttons
 startBtn.addEventListener("click", startViewer);
 stopBtn.addEventListener("click", stopViewer);
@@ -229,3 +260,94 @@ $("clearLogBtn").addEventListener("click", ()=>{
 
 // Expose for optional auto-start
 window.__startSession = startViewer;
+
+// -----------------------------------------------------
+// Microphone / Transcription support (only if backend has Whisper)
+async function populateDevices(){
+  try{
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioInputs = devices.filter(d => d.kind === "audioinput");
+    micSelect.innerHTML = "";
+    audioInputs.forEach(d=>{
+      const o = document.createElement("option");
+      o.value = d.deviceId; o.textContent = d.label || `Mic ${micSelect.length+1}`;
+      micSelect.appendChild(o);
+    });
+  } catch(e){
+    await flog("mic", "enumerateDevices failed", { err: String(e) }, "ERROR");
+  }
+}
+
+async function startMic(){
+  if (!HAS_WHISPER) return;
+  micStart.disabled = true;
+  micStop.disabled = false;
+  micText.value = "";
+
+  try{
+    const constraints = { audio: { deviceId: micSelect.value ? { exact: micSelect.value } : undefined } };
+    micStream = await navigator.mediaDevices.getUserMedia(constraints);
+  } catch(e){
+    await flog("mic", "getUserMedia failed", { err: String(e) }, "ERROR");
+    micStart.disabled = false; micStop.disabled = true;
+    return;
+  }
+
+  try{
+    mediaRecorder = new MediaRecorder(micStream, { mimeType: "audio/webm" });
+  } catch(e){
+    await flog("mic", "MediaRecorder init failed", { err: String(e) }, "ERROR");
+    micStart.disabled = false; micStop.disabled = true;
+    return;
+  }
+
+  mediaRecorder.ondataavailable = async (ev)=>{
+    if (!ev.data || !ev.data.size) return;
+    try{
+      const blob = ev.data;
+      const form = new FormData();
+      form.append("chunk", blob, "chunk.webm");
+      const r = await fetch(`${window.API_BASE}/api/transcribe-chunk`, { method: "POST", body: form });
+      const j = await r.json().catch(()=>({}));
+      await flog("mic", "/api/transcribe-chunk response", { http: r.status, body: j });
+      if (j && j.text) {
+        micText.value += (micText.value ? "\n" : "") + j.text;
+        micText.scrollTop = micText.scrollHeight;
+      }
+    } catch(e){
+      await flog("mic", "transcribe-chunk failed", { err: String(e) }, "ERROR");
+    }
+  };
+
+  mediaRecorder.start(); // start stream
+  // cycle requestData every chunkMs
+  recordTimer = setInterval(()=>{
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+      try { mediaRecorder.requestData(); } catch {}
+    }
+  }, chunkMs);
+
+  await flog("mic", "mic started", { device: micSelect.value, chunk_ms: chunkMs });
+}
+
+async function stopMic(){
+  try{
+    if (recordTimer) { clearInterval(recordTimer); recordTimer = null; }
+    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+  } catch {}
+  try{
+    if (micStream) micStream.getTracks().forEach(t => t.stop());
+  } catch {}
+  micStream = null; mediaRecorder = null;
+  micStart.disabled = false; micStop.disabled = true;
+  await flog("mic", "mic stopped");
+}
+
+micStart.addEventListener("click", startMic);
+micStop.addEventListener("click", stopMic);
+
+// refresh devices on permission grant
+navigator.mediaDevices && navigator.mediaDevices.addEventListener &&
+navigator.mediaDevices.addEventListener("devicechange", async()=>{
+  if (HAS_WHISPER) await populateDevices();
+});
