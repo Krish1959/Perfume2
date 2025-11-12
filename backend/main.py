@@ -468,6 +468,26 @@ def _perfume_system_prompt(lang: str = "en") -> str:
 def _perfume_system_prompt_english_only() -> str:
     return _perfume_system_prompt("en")
 
+# ===== Voice system rules for the new mic flow (as requested) =====
+def _voice_system_prompt() -> str:
+    return (
+        "You are Perfume2's voice assistant.\n\n"
+        "TASKS:\n"
+        "1) TRANSCRIBE the user's speech faithfully and fix obvious grammar/wording mistakes. Call this value 'transcript'.\n"
+        "2) SAFETY/BLOCK: If the speech contains vulgar words, hate/abuse, sexual content, unethical/illegal requests, or it is about politics or religion, then set the reply to exactly 'NO' (uppercase) and set reason='blocked'. Still return the 'transcript'.\n"
+        "3) RELEVANCE: If the topic is not about perfumes, buying/selling perfume, fragrance notes/usage/availability/price/shipping, or a closely related matter, respond briefly asking the user to contact Ms. Mishell Lu and set reason='irrelevant'.\n"
+        f"4) OTHERWISE: Answer helpfully in a warm, flowery style (up to ~200 words). Base any product facts on this page when relevant: {PERFUME_PAGE}. Do not paste the URL unless asked.\n"
+        "5) LANGUAGE: If the user's input is predominantly Mandarin Chinese, write the reply in Simplified Chinese and set lang='zh'; otherwise write in English and set lang='en'.\n\n"
+        "Return ONLY a valid JSON object with the following shape:\n"
+        "{"
+        "\"transcript\": string, "
+        "\"response\": string, "
+        "\"lang\": \"en\"|\"zh\", "
+        "\"reason\": \"ok\"|\"irrelevant\"|\"blocked\""
+        "}\n"
+        "Do not include any extra keys or commentary."
+    )
+
 # =====================================================
 #   OPENAI — Perfume explanation for tile buttons
 # =====================================================
@@ -520,7 +540,7 @@ async def perfume_explain(
         raise HTTPException(502, f"OpenAI error: {e}")
 
 # =====================================================
-#      AUDIO → RESPONSES API (voicechat) via raw HTTPS
+#      AUDIO → RESPONSES API (voicechat) — UPDATED
 # =====================================================
 @app.post("/api/voicechat")
 async def voicechat(file: UploadFile = File(...)):
@@ -551,7 +571,6 @@ async def voicechat(file: UploadFile = File(...)):
 
         stage = "build_request"
         b64 = base64.b64encode(wav_bytes).decode("ascii")
-        logger.info(f"[voicechat] b64_len={len(b64)}")
 
         stage = "openai_call"
         url = "https://api.openai.com/v1/responses"
@@ -560,10 +579,29 @@ async def voicechat(file: UploadFile = File(...)):
             "modalities": ["text"],
             "temperature": 0.4,
             "max_output_tokens": 900,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "perfume_voice_reply",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "transcript": {"type": "string"},
+                            "response":   {"type": "string"},
+                            "lang":       {"type": "string", "enum": ["en", "zh"]},
+                            "reason":     {"type": "string", "enum": ["ok", "irrelevant", "blocked"]}
+                        },
+                        "required": ["transcript", "response", "lang", "reason"],
+                        "additionalProperties": False
+                    }
+                }
+            },
             "input": [
-                {"role": "system", "content": [{"type": "output_text", "text": _perfume_system_prompt("en")}]},
+                {"role": "system", "content": [
+                    {"type": "output_text", "text": _voice_system_prompt()}
+                ]},
                 {"role": "user", "content": [
-                    {"type": "input_text", "text": "Explain based on the voice chat input about perfume. Details are to be picked from the linked page when relevant."},
+                    {"type": "input_text", "text": "Please listen to the audio and follow the rules strictly."},
                     {"type": "input_audio", "audio": {"format": "wav", "data": [b64]}}
                 ]}
             ]
@@ -581,9 +619,44 @@ async def voicechat(file: UploadFile = File(...)):
             return JSONResponse(status_code=502, content={"error": "openai_error", "stage": stage, "openai_status": r.status_code, "openai_body": j})
 
         stage = "parse_response"
-        out_text = (j.get("output_text") or "").strip()
-        logger.info(f"[voicechat] ok text_len={len(out_text)}")
-        return {"text": out_text, "debug": {"stage": stage, "upload": meta, "wav_bytes": len(wav_bytes), "b64_len": len(b64)}}
+        # For response_format JSON, most SDKs place the JSON in 'output_text' as a string.
+        obj = None
+        try:
+            txt = (j.get("output_text") or "").strip()
+            if txt:
+                obj = json.loads(txt)
+        except Exception:
+            obj = None
+
+        if not obj:
+            # Fallback: try to locate JSON in generic fields if format differs
+            try:
+                # Some variants return {"output":[{"content":[{"type":"output_text","text":"{...json...}"}]}]}
+                outputs = j.get("output") or []
+                for item in outputs:
+                    for c in (item.get("content") or []):
+                        if c.get("type") in ("output_text", "text") and isinstance(c.get("text"), str):
+                            try:
+                                obj = json.loads(c["text"])
+                                break
+                            except Exception:
+                                pass
+                    if obj:
+                        break
+            except Exception:
+                obj = None
+
+        if not obj or not isinstance(obj, dict):
+            logger.error(f"[voicechat] could not parse JSON: {j}")
+            return JSONResponse(status_code=502, content={"error": "openai_parse_error", "stage": stage, "openai_body": j})
+
+        transcript = (obj.get("transcript") or "").strip()
+        response   = (obj.get("response") or "").strip()
+        lang       = (obj.get("lang") or "en").strip()
+        reason     = (obj.get("reason") or "ok").strip()
+
+        logger.info(f"[voicechat] ok reason={reason} lang={lang} tr_len={len(transcript)} rsp_len={len(response)}")
+        return {"transcript": transcript, "response": response, "lang": lang, "reason": reason}
 
     except Exception as e:
         logger.exception(f"[voicechat] failed at stage={stage}")
