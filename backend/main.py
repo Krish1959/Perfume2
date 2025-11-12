@@ -19,12 +19,10 @@ from fastapi.middleware.cors import CORSMiddleware
 ROOT_DIR = Path(__file__).parent.resolve()
 
 def _resolve_front_dir() -> Path:
-    # Prefer ./frontend if it exists and has index.html, else fall back to repo root
     candidates = [ROOT_DIR / "frontend", ROOT_DIR]
     for d in candidates:
         if (d / "index.html").exists():
             return d
-    # If neither has index.html, still prefer ./frontend if it exists
     return ROOT_DIR / "frontend" if (ROOT_DIR / "frontend").exists() else ROOT_DIR
 
 FRONT_DIR = _resolve_front_dir()
@@ -547,7 +545,7 @@ async def perfume_explain(
         raise HTTPException(502, f"OpenAI error: {e}")
 
 # =====================================================
-#      AUDIO → RESPONSES API (voicechat) — UPDATED
+#      AUDIO → RESPONSES API (voicechat) — UPDATED (text.format fix)
 # =====================================================
 @app.post("/api/voicechat")
 async def voicechat(file: UploadFile = File(...)):
@@ -586,20 +584,23 @@ async def voicechat(file: UploadFile = File(...)):
             "modalities": ["text"],
             "temperature": 0.4,
             "max_output_tokens": 900,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "perfume_voice_reply",
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "transcript": {"type": "string"},
-                            "response":   {"type": "string"},
-                            "lang":       {"type": "string", "enum": ["en", "zh"]},
-                            "reason":     {"type": "string", "enum": ["ok", "irrelevant", "blocked"]}
-                        },
-                        "required": ["transcript", "response", "lang", "reason"],
-                        "additionalProperties": False
+            # --------- The important fix: use text.format instead of response_format ---------
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "perfume_voice_reply",
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "transcript": {"type": "string"},
+                                "response":   {"type": "string"},
+                                "lang":       {"type": "string", "enum": ["en", "zh"]},
+                                "reason":     {"type": "string", "enum": ["ok", "irrelevant", "blocked"]}
+                            },
+                            "required": ["transcript", "response", "lang", "reason"],
+                            "additionalProperties": False
+                        }
                     }
                 }
             },
