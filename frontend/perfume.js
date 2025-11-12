@@ -228,7 +228,7 @@ gptBtn.addEventListener("click", async () => {
   }
 });
 
-// Mic + transcription (toggle labels Rec/End)
+// Mic + voicechat (toggle labels Rec/End) — UPDATED FLOW
 let mediaRecorder = null, chunks = [], audioCtx = null, analyser = null, sourceNode = null, raf = 0;
 
 function chooseMime() {
@@ -262,14 +262,37 @@ async function startRecording() {
         const ext  = blob.type.includes("mp4") ? "m4a" : blob.type.includes("ogg") ? "ogg"
                     : blob.type.includes("mpeg") ? "mp3" : "webm";
         const fd = new FormData(); fd.append("file", new File([blob], `rec.${ext}`, { type: blob.type }));
-        await flog("mic", "sending to /api/transcribe", { type: blob.type, size: blob.size });
-        const r = await fetch(`${window.API_BASE}/api/transcribe`, { method: "POST", body: fd });
+
+        setStatus("Thinking…");
+        await flog("mic", "sending to /api/voicechat", { type: blob.type, size: blob.size });
+        const r = await fetch(`${window.API_BASE}/api/voicechat`, { method: "POST", body: fd });
         const j = await r.json().catch(()=>({}));
-        await flog("mic", "/api/transcribe response", { http: r.status, body: j });
-        if (j && j.text) editBox.value = j.text;
-        setStatus("Ready.");
+        await flog("mic", "/api/voicechat response", { http: r.status, body: j });
+
+        if (r.status >= 400 || !(j && (j.response || j.text))) {
+          setStatus("Voicechat error (see debug)");
+        } else {
+          const transcript = (j.transcript || "").trim();
+          const reply      = (j.response || j.text || "").trim();
+          const lang       = (j.lang || "en");
+
+          // Log transcript for debugging; write reply into EditBox
+          if (transcript) uiLog("mic", "transcript", { text: transcript, lang });
+          if (reply) {
+            editBox.value = reply;
+
+            // auto-send reply to avatar to read aloud (if a session is active)
+            if (SESSION_ID && SESSION_TOKEN) {
+              const payload = { session_id: SESSION_ID, session_token: SESSION_TOKEN, text: reply };
+              fetch(`${window.API_BASE}/api/send-task`, {
+                method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(payload)
+              }).catch(()=>{});
+            }
+          }
+          setStatus("Ready.");
+        }
       } catch (e) {
-        setStatus(`Transcription error: ${e?.message || e}`);
+        setStatus(`Voicechat error: ${e?.message || e}`);
       } finally {
         stream.getTracks().forEach(t => t.stop()); mediaRecorder = null;
         micBtn.textContent = "🎙️ Rec"; micBtn.classList.remove("recording");
