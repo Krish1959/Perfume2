@@ -545,7 +545,7 @@ async def perfume_explain(
         raise HTTPException(502, f"OpenAI error: {e}")
 
 # =====================================================
-#      AUDIO → RESPONSES API (voicechat) — UPDATED (text.format fix)
+#      AUDIO → RESPONSES API (voicechat) — UPDATED (no 'modalities', uses text.format)
 # =====================================================
 @app.post("/api/voicechat")
 async def voicechat(file: UploadFile = File(...)):
@@ -581,10 +581,9 @@ async def voicechat(file: UploadFile = File(...)):
         url = "https://api.openai.com/v1/responses"
         payload = {
             "model": "gpt-4o-audio-preview",
-            "modalities": ["text"],
             "temperature": 0.4,
             "max_output_tokens": 900,
-            # --------- The important fix: use text.format instead of response_format ---------
+            # --------- Structured output via text.format ---------
             "text": {
                 "format": {
                     "type": "json_schema",
