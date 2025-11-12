@@ -545,7 +545,7 @@ async def perfume_explain(
         raise HTTPException(502, f"OpenAI error: {e}")
 
 # =====================================================
-#      AUDIO → RESPONSES API (voicechat) — UPDATED (no 'modalities', uses text.format)
+#      AUDIO → RESPONSES API (voicechat) — UPDATED (no 'modalities', uses text.format, and system uses input_text)
 # =====================================================
 @app.post("/api/voicechat")
 async def voicechat(file: UploadFile = File(...)):
@@ -605,7 +605,7 @@ async def voicechat(file: UploadFile = File(...)):
             },
             "input": [
                 {"role": "system", "content": [
-                    {"type": "output_text", "text": _voice_system_prompt()}
+                    {"type": "input_text", "text": _voice_system_prompt()}  # <-- fixed
                 ]},
                 {"role": "user", "content": [
                     {"type": "input_text", "text": "Please listen to the audio and follow the rules strictly."},
