@@ -545,7 +545,7 @@ async def perfume_explain(
         raise HTTPException(502, f"OpenAI error: {e}")
 
 # =====================================================
-#      AUDIO → RESPONSES API (voicechat) — UPDATED (no 'modalities', uses text.format, and system uses input_text)
+#  AUDIO → RESPONSES API (voicechat) — use input_file (no input_audio)
 # =====================================================
 @app.post("/api/voicechat")
 async def voicechat(file: UploadFile = File(...)):
@@ -574,16 +574,33 @@ async def voicechat(file: UploadFile = File(...)):
             return JSONResponse(status_code=500, content={"error": "ffmpeg_conversion_failed", "stage": stage, "meta": meta})
         logger.info(f"[voicechat] wav_bytes={len(wav_bytes)}")
 
-        stage = "build_request"
-        b64 = base64.b64encode(wav_bytes).decode("ascii")
+        # ---------- NEW: upload audio to /v1/files (purpose=input) ----------
+        stage = "openai_upload_file"
+        files_url = "https://api.openai.com/v1/files"
+        files_headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        files_data = {"purpose": "input"}
+        files_files = {"file": ("voice.wav", wav_bytes, "audio/wav")}
+        r_file = requests.post(files_url, headers=files_headers, data=files_data, files=files_files, timeout=120)
+        try:
+            j_file = r_file.json()
+        except Exception:
+            logger.error(f"[voicechat] files non-JSON: {r_file.text[:300]}")
+            return JSONResponse(status_code=502, content={"error": "openai_files_non_json", "stage": stage})
+        if r_file.status_code >= 400:
+            logger.error(f"[voicechat] files error {r_file.status_code}: {j_file}")
+            return JSONResponse(status_code=502, content={"error": "openai_files_error", "stage": stage, "openai_status": r_file.status_code, "openai_body": j_file})
+        file_id = j_file.get("id")
+        if not file_id:
+            logger.error(f"[voicechat] files: missing id {j_file}")
+            return JSONResponse(status_code=502, content={"error": "openai_files_missing_id", "stage": stage, "openai_body": j_file})
 
+        # ---------- Responses call: reference audio via input_file ----------
         stage = "openai_call"
         url = "https://api.openai.com/v1/responses"
         payload = {
             "model": "gpt-4o-audio-preview",
             "temperature": 0.4,
             "max_output_tokens": 900,
-            # --------- Structured output via text.format ---------
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -605,16 +622,16 @@ async def voicechat(file: UploadFile = File(...)):
             },
             "input": [
                 {"role": "system", "content": [
-                    {"type": "input_text", "text": _voice_system_prompt()}  # <-- fixed
+                    {"type": "input_text", "text": _voice_system_prompt()}
                 ]},
                 {"role": "user", "content": [
                     {"type": "input_text", "text": "Please listen to the audio and follow the rules strictly."},
-                    {"type": "input_audio", "audio": {"format": "wav", "data": [b64]}}
+                    {"type": "input_file", "file_id": file_id}
                 ]}
             ]
         }
         headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
-        r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=120)
+        r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=180)
         body_text = r.text
         try:
             j = r.json()
